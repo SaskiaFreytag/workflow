@@ -1,0 +1,253 @@
+---
+title: 'snRNA-seq workflow: bioconductor'
+author: "Saskia Freytag"
+date: "08/04/2019"
+output:
+  html_document:
+    toc: true
+    theme: simplex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+```
+
+## Prerequisities 
+
+### Required libraries
+
+```{r libraries}
+library(DropletUtils)
+library(scater)
+library(scran)
+library(umap)
+```
+
+```{r setup-ggplot2}
+library(ggplot2)
+theme_set(theme_classic())
+```
+
+## Import data
+
+### Loading data
+
+Unfortunately, Cell Ranger recently changed its naming convention. The file that
+used to be called `genes.tsv` is now named `features.tsv`. The easiest 
+work-around, until a change to `DropUtils`, is to rename the files.
+
+```{r import}
+samples <- list.files(here::here("data/raw"))
+dat <- lapply(samples, function(x) read10xCounts(here::here("data/raw", x)))
+```
+
+## Filtering
+
+### Filtering of nuclei
+
+First, we filter any nuclei with greater than 5\% total mitochondrial 
+contamination. Fortunatley, there are no nuclei in this test dataset. But this 
+is an importnat quality control step.
+
+```{r filter-mito}
+for (i in 1:length(dat)) {
+  
+  rowData(dat[[i]])$Mito <-  grepl("^MT-", rowData(dat[[i]])$Symbol)
+  dat[[i]] <- calculateQCMetrics(dat[[i]], 
+    feature_controls=list(Mt=rowData(dat[[i]])$Mito))
+
+}
+
+no_nuclei_mito <- sapply(dat, function(x) sum(colData(x)$pct_counts_Mt>5))
+
+paste0("Nuclei with more than 5% mitochondrial percentage in ", samples, ": ",
+      no_nuclei_mito, " (", round(no_nuclei_mito/sapply(dat, 
+        function(x) dim(x)[2]),2)*100, "%)")
+
+dat <- lapply(dat, function(x) x[,!colData(x)$pct_counts_Mt>5])
+```
+
+Next we filter any nuclei that have library sizes three standard below the 
+median. We also filter any nuclei with a number of features three standard
+deaviations below the median.
+
+```{r filter-low}
+libsize_drop <- lapply(dat, function(x) 
+  isOutlier(x$total_counts, nmads=3, type="lower", log=TRUE))
+feature_drop <- lapply(dat, function(x) 
+  isOutlier(x$total_features_by_counts, nmads=3, type="lower", log=TRUE))
+
+no_nuclei_libsize <- sapply(libsize_drop, function(x) sum(x))
+no_nuclei_feature <- sapply(feature_drop, function(x) sum(x))
+
+paste0("Nuclei not passing library size filter ", samples, ": ",
+      no_nuclei_libsize, " (", round(no_nuclei_libsize/sapply(dat, function(x) dim(x)[2]),2)*100, "%)")
+
+paste0("Nuclei not passing feature filter ", samples, ": ",
+      no_nuclei_feature, " (", round(no_nuclei_feature/sapply(dat, function(x) dim(x)[2]),2)*100, "%)")
+
+for (i in 1:length(samples)){
+  
+  dat[[i]] <- dat[[i]][, !libsize_drop[[i]]|feature_drop[[i]]]
+
+}
+```
+
+### Filtering of genes
+
+In order to filter genes we need to combine the data. Then we filter any gene
+that is seen in less than 1\% of the data.
+
+```{r filter-genes}
+sce_counts <- Reduce(cbind, lapply(dat, function(x) counts(x)))
+
+keep_genes <- apply(sce_counts, 1, function(x) 
+  sum(x>0)>(dim(sce_counts)[2]*0.01))
+
+dat <- lapply(dat, function(x) x[keep_genes,])
+sce_counts <- sce_counts[keep_genes,]
+```
+
+## Normalization
+
+```{r normalization}
+dat <- do.call(multiBatchNorm, dat)
+```
+
+### Batch correction
+
+Perfom mnn correction to generate a common PCA representation for the samples.
+
+```{r batch-correction}
+dat_pca <- do.call(fastMNN, 
+  c(dat, list(k=20, d=50, approximate=TRUE)))
+```
+
+Next make a new `SingleCellExperiment`  object with the combined data. In order 
+to ensure that any cell can be traced first make a new sample identifier.
+
+```{r combine-data}
+for (i in 1:length(samples)){
+  
+  dat[[i]]$Sample_ID <- samples[i]
+  
+}
+
+sce_colData <- Reduce(rbind, lapply(dat, function(x) colData(x)))
+sce_rowData <- rowData(dat[[1]])
+
+sce <- SingleCellExperiment(assays=list(counts=sce_counts),
+                            colData=sce_colData,
+                            rowData=sce_rowData)
+
+rm("sce_counts", "sce_rowData", "sce_colData")
+gc()
+
+sce_lib_factors <- c(unlist(sapply(dat, function(x) librarySizeFactors(x))))
+sce@int_colData$size_factor <- sce_lib_factors
+sce <- normalize(sce)
+reducedDim(sce, "MNN") <- dat_pca$corrected
+```
+
+Let's see whether this has improved things.
+
+```{r plotting}
+sce <- runPCA(sce)
+
+plot_dat <- data.frame(pca1 = reducedDim(sce, "PCA")[,1],
+                       pca2 = reducedDim(sce, "PCA")[,2],
+                       mnn1 = reducedDim(sce, "MNN")[,1],
+                       mnn2 = reducedDim(sce, "MNN")[,2],
+                       sample = sce$Sample_ID)
+
+ggplot(plot_dat, aes(x = pca1, y = pca2)) + 
+  geom_point(aes(col = sample), alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1")
+ggplot(plot_dat, aes(x = mnn1, y = mnn2)) +  
+  geom_point(aes(col = sample), alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1")
+```
+
+## Clustering
+
+### Dimension Reduction
+
+```{r umap}
+umap.defaults$n_neighbors = 50
+umap.defaults$min_dist= 0.1
+sce <- runUMAP(sce, use_dimred="MNN", config = umap.defaults)
+```
+
+### Clustering
+
+```{r clustering}
+snn.gr <- buildSNNGraph(sce, use.dimred="UMAP", k=100)
+clusters <- igraph::cluster_louvain(snn.gr)
+table(clusters$membership, sce$Sample_ID)
+```
+
+```{r plot-clustering}
+sce$Cluster <- factor(clusters$membership)
+
+plot_dat$umap1 <- reducedDim(sce, "UMAP")[,1]
+plot_dat$umap2 <- reducedDim(sce, "UMAP")[,2]
+plot_dat$cluster <- sce$Cluster 
+
+ggplot(plot_dat, aes(x = umap1, y=umap2)) + 
+  geom_point(aes(col = cluster), alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1")
+```
+
+## Annotation
+
+Highlight marker genes for different cell types.
+
+```{r}
+known_markers <- read.table(here::here("data/meta/", 
+  "mouse_brain_cell_type_markers.txt"), sep="\t", fill=TRUE, header=T)
+
+all_cell_types <- sapply(as.character(known_markers$Description), 
+  function(x) strsplit(x, ",")[[1]][1])
+known_markers$CellType <- all_cell_types
+
+excitatory_markers <- sapply(grep("Excitatory neurons", known_markers$CellType),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+inhibitory_markers <- sapply(grep("interneurons", known_markers$CellType),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+microglia_markers <- sapply(grep("Microglia", known_markers$CellType),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+astrocyte_markers <- sapply(grep("astrocyte", known_markers$CellType),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+oligo_markers <- sapply(grep("oligodendrocyte", known_markers$CellType),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+
+markers <- list(excitatory = unlist(excitatory_markers),
+                inhibitory = unlist(inhibitory_markers),
+                microglia = unlist(microglia_markers),
+                astrocyte = unlist(astrocyte_markers),
+                oligodendrocyte = unlist(oligo_markers))
+
+cell_type_means <- sapply(markers, function(x) {
+  index <- match(x , rowData(sce)$Symbol)
+  index <- index[!is.na(index)]
+  return(colMeans(as.matrix(logcounts(sce[index,]))))
+})
+colnames(cell_type_means) <- names(markers)
+
+plot_dat <- cbind(plot_dat, cell_type_means)
+
+for (i in colnames(cell_type_means)) {
+  
+  gg <- ggplot(plot_dat, aes(x = umap1, y = umap2)) + 
+    geom_point(aes_string(color=i)) + scale_color_viridis_c()
+  
+  print(gg)
+  
+}
+
+```
+
+## Trajectory analysis
+
+Still to come!

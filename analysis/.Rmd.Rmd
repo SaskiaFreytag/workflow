@@ -1,0 +1,25 @@
+---
+title: 'snRNA-seq workflow: bioconductor'
+author: "Saskia Freytag"
+date: "08/04/2019"
+output:
+  html_document:
+    toc: true
+    theme: simplex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Prerequisities 
+
+## Required libraries
+
+## Loading data
+
+## Add annotation
+
+## Filtering of nuclei
+
+## Filtering of genes
