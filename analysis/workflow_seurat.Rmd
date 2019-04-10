@@ -1,0 +1,162 @@
+---
+title: 'snRNA-seq workflow: Seurat'
+author: "Saskia Freytag"
+date: "09/04/2019"
+output:
+  html_document:
+    toc: true
+    theme: simplex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+```
+
+## Prerequisities 
+
+### Required libraries
+
+```{r libraries}
+library(dplyr)
+library(scater)
+library(Seurat)
+library(sctransform)
+```
+
+```{r setup-ggplot2}
+library(ggplot2)
+theme_set(theme_classic())
+```
+
+## Import data
+
+### Loading data
+
+```{r import}
+samples <- list.files(here::here("data/raw"))
+dat_s <- lapply(samples, function(x) Read10X(here::here("data/raw", x, "mm10")))
+dat_s <- lapply(dat_s, function(x) CreateSeuratObject(x, 
+    min.cells=(0.01*dim(x)[2])))
+names(dat_s) <- samples
+```
+
+```{r}
+for (i in 1:length(samples)){
+  
+  dat_s[[i]]$Sample_ID <- samples[i]
+  
+}
+```
+
+## Filtering
+
+### Filtering of nuclei
+
+First, we filter any nuclei with greater than 10\% total mitochondrial 
+contamination. Fortunatley, there are no nuclei in this test dataset. But this 
+is an importnat quality control step.
+
+```{r filter-mito}
+for (i in 1:length(dat_s)) {
+  
+  dat_s[[i]][["percent.mt"]] <- PercentageFeatureSet(object = dat_s[[i]], 
+    pattern = "^mt-")
+
+}
+
+no_nuclei_mito <- sapply(dat_s, function(x) sum(x$percent.mt>10))
+
+paste0("Nuclei with more than 10`% mitochondrial percentage in ", samples, ": ",
+      no_nuclei_mito, " (", round(no_nuclei_mito/sapply(dat_s, 
+        function(x) dim(x)[2]),2)*100, "%)")
+
+dat_s <- lapply(dat_s, function(x) subset(x, subset = percent.mt<10))
+```
+
+Next we filter any nuclei that have library sizes three standard below the 
+median. We also filter any nuclei with a number of features three standard
+deviations below the median.
+
+```{r filter-low}
+libsize_drop <- lapply(dat_s, function(x) isOutlier(x$nCount_RNA, nmads=3,
+  log=TRUE, type="lower"))
+feature_drop <-  lapply(dat_s, function(x) isOutlier(x$nFeature_RNA, nmads=3,
+  log=TRUE, type="lower"))
+
+no_nuclei_libsize <- sapply(libsize_drop, function(x) sum(x))
+no_nuclei_feature <- sapply(feature_drop, function(x) sum(x))
+
+paste0("Nuclei not passing library size filter ", samples, ": ",
+      no_nuclei_libsize, " (", round(no_nuclei_libsize/sapply(dat_s, function(x) dim(x)[2]),2)*100, "%)")
+
+paste0("Nuclei not passing feature filter ", samples, ": ",
+      no_nuclei_feature, " (", round(no_nuclei_feature/sapply(dat_s, function(x) dim(x)[2]),2)*100, "%)")
+
+for (i in 1:length(samples)){
+  
+  dat_s[[i]] <- dat_s[[i]][, !(libsize_drop[[i]]|feature_drop[[i]])]
+
+}
+```
+
+## Normalization
+
+```{r normalization}
+dat_s <- lapply(dat_s, function(x) NormalizeData(object = x, verbose = FALSE))
+```
+
+## Find variable genes
+
+```{r variable-genes}
+dat_s <- lapply(dat_s, function(x) FindVariableFeatures(object = x, 
+  selection.method = "vst", nfeatures = 500))
+```
+
+### Batch correction
+
+Perfom mnn correction to generate a common PCA representation for the samples.
+
+```{r batch-correction}
+seurat_anchors <- FindIntegrationAnchors(object.list = dat_s, dims = 1:20)
+seurat <- IntegrateData(anchorset = seurat_anchors, dims = 1:20)
+```
+
+Next make a new `Seurat`  object with the combined data. In order 
+to ensure that any cell can be traced first make a new sample identifier.
+
+```{r combine-data}
+DefaultAssay(object = seurat) <- "integrated"
+seurat <- ScaleData(object = seurat, verbose = FALSE)
+
+seurat <- RunPCA(object = seurat, npcs = 30, verbose = FALSE)
+```
+
+Let's see whether this has improved things.
+
+```{r plotting}
+DimPlot(object = seurat, reduction = "pca", group.by = "Sample_ID")
+```
+
+## Clustering
+
+### Dimension Reduction
+
+```{r umap}
+seurat <- RunUMAP(object = seurat, reduction = "pca", dims = 1:20)
+```
+
+### Clustering
+
+```{r clustering}
+seurat <- FindNeighbors(object = seurat, reduction = "umap", 
+  dims = 1:2, k.param = 50)
+seurat <- FindClusters(seurat, resolution = 0.5)
+```
+
+```{r plot-clustering}
+DimPlot(object = seurat, reduction = "umap", group.by = "seurat_clusters")
+DimPlot(object = seurat, reduction = "umap", group.by = "Sample_ID")
+```
+
+
