@@ -25,6 +25,7 @@ library(umap)
 ```
 
 ```{r setup-ggplot2}
+library(iSEE)
 library(ggplot2)
 theme_set(theme_classic())
 ```
@@ -62,7 +63,7 @@ for  (i in 1:length(dat)) {
 
 no_nuclei_mito <- sapply(dat, function(x) sum(colData(x)$pct_counts_Mt>10))
 
-paste0("Nuclei with more than 5% mitochondrial percentage in ", samples, ": ",
+paste0("Nuclei with more than 10% mitochondrial percentage in ", samples, ": ",
       no_nuclei_mito, " (", round(no_nuclei_mito/sapply(dat, 
         function(x) dim(x)[2]),2)*100, "%)")
 
@@ -265,3 +266,36 @@ ggplot(plot_dat, aes(x = umap1, y = umap2)) +
 ## Trajectory analysis
 
 Still to come!
+
+## Interactive instance
+
+### iSEE
+
+```{r iSEE}   
+rownames(sce) <- rowData(sce)$Symbol
+sce <- sce [!duplicated(rownames(sce)),]
+
+fexArg <- featAssayPlotDefaults(sce, 2)
+fexArg$YAxisFeatName <- c("Map2", "Rbfox3")
+fexArg$ColorBy <- c("Column data", "Column data")
+fexArg$ColorByColData <- c("Cluster", "Sample_ID")
+
+rdArgs <- redDimPlotDefaults(sce, 2)
+rdArgs$DataBoxOpen <- FALSE
+rdArgs$Type <- c("UMAP", "MNN")
+rdArgs$ColorBy <- c("Column data", "Column data")
+rdArgs$ColorByColData <- c("Cluster", "Sample_ID")
+rdArgs$XAxis <- c(1,1)
+rdArgs$YAxis <- c(2,2)
+
+init <- DataFrame(
+    Name = c("Reduced dimension plot 1", "Feature assay plot 1", 
+             "Reduced dimension plot 2", "Feature assay plot 2"),
+    Width = c(6, 6)
+)
+
+app <- iSEE(sce, initialPanels = init, featAssayArgs = fexArg,
+            redDimArgs = rdArgs)
+```
+
+To initialize simply run `app`.
