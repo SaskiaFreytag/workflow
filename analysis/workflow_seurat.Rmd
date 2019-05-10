@@ -159,4 +159,79 @@ DimPlot(object = seurat, reduction = "umap", group.by = "seurat_clusters")
 DimPlot(object = seurat, reduction = "umap", group.by = "Sample_ID")
 ```
 
+## Annotation
 
+Highlight marker genes for different cell types.
+
+```{r plotting}
+plot_dat <- data.frame(umap1 = seurat@reductions$umap@cell.embeddings[,1],
+                       umap2 = seurat@reductions$umap@cell.embeddings[,2],
+                       sample = seurat$Sample_ID,
+                       cluster = seurat$seurat_clusters,
+                       umi = seurat@meta.data$nCount_RNA)
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) + 
+  geom_point(aes(col = sample), alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1")
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +  
+  geom_point(aes(col = cluster), alpha = 0.5) + 
+  scale_colour_brewer(palette = "Set1")
+```
+
+
+```{r}
+known_markers <- read.table(here::here("data/meta/", 
+  "mouse_brain_cell_type_markers.txt"), sep="\t", fill=TRUE, header=T)
+
+all_cell_types <- sapply(as.character(known_markers$Description), 
+  function(x) strsplit(x, ",")[[1]][1])
+known_markers$CellType <- all_cell_types
+
+glia_markers <- sapply(which(known_markers$Neurotransmitter==""),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+vglut1_markers <- sapply(grep("VGLUT1", known_markers$Neurotransmitter),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+vglut2_markers <- sapply(grep("VGLUT2", known_markers$Neurotransmitter),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+GABA_markers <- sapply(grep("GABA", known_markers$Neurotransmitter),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " ")))
+
+
+markers <- list(gaba = unlist(GABA_markers),
+                glia = unlist(glia_markers),
+                vglut1 = unlist(vglut1_markers),
+                vglut2 = unlist(vglut2_markers))
+
+cell_type_means <- sapply(markers, function(x) {
+  index <- match(x , rownames(seurat@assays$RNA))
+  index <- index[!is.na(index)]
+  return(colMeans(as.matrix(seurat@assays$RNA[index,])))
+})
+colnames(cell_type_means) <- names(markers)
+
+plot_dat <- cbind(plot_dat, cell_type_means)
+
+for (i in colnames(cell_type_means)) {
+  
+  gg <- ggplot(plot_dat, aes(x = umap1, y = umap2)) + 
+    geom_point(aes_string(color=i)) + scale_color_viridis_c()
+  
+  print(gg)
+  
+}
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) + 
+  geom_point(aes(color=umi)) + scale_color_viridis_c()
+```
+
+## Investigate mature genes
+
+```{r}
+mature_genes <- c("Map2", "Rbfox3")
+index <- match(mature_genes , rownames(seurat@assays$RNA))
+index <- index[!is.na(index)]
+plot_dat$mature <- colMeans(as.matrix(seurat@assays$RNA[index,]))
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) + 
+  geom_point(aes(color=mature)) + scale_color_viridis_c()
+```

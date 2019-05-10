@@ -20,7 +20,7 @@ library(here)
 ```{r libraries}
 library(DropletUtils)
 library(scater)
-library(scran)
+library(batchelor)
 library(umap)
 ```
 
@@ -131,8 +131,8 @@ dat <- lapply(dat, normalize)
 Perfom mnn correction to generate a common PCA representation for the samples.
 
 ```{r batch-correction}
-dat_pca <- do.call(fastMNN, 
-  c(dat, list(k=50, d=50, approximate=TRUE, ndist=10)))
+dat_pca <- do.call(batchelor::fastMNN, 
+  c(dat, list(k=50, d=50, ndist=10)))
 ```
 
 Next make a new `SingleCellExperiment`  object with the combined data. In order 
@@ -158,7 +158,7 @@ sce <- SingleCellExperiment(assays=list(counts=sce_counts),
 #sce_lib_factors <- c(unlist(sapply(dat, function(x) librarySizeFactors(x))))
 #sce@int_colData$size_factor <- sce_lib_factors
 sce <- normalize(sce)
-reducedDim(sce, "MNN") <- dat_pca$corrected
+reducedDim(sce, "MNN") <- reducedDim(dat_pca,"corrected")
 ```
 
 Let's see whether this has improved things.
@@ -185,9 +185,9 @@ ggplot(plot_dat, aes(x = mnn1, y = mnn2)) +
 ### Dimension Reduction
 
 ```{r umap}
-umap.defaults$n_neighbors = 20
-umap.defaults$min_dist= 0.1
-sce <- runUMAP(sce, use_dimred="MNN", config = umap.defaults)
+#umap.defaults$n_neighbors = 20
+#umap.defaults$min_dist= 0.1
+sce <- runUMAP(sce, use_dimred="MNN")
 ```
 
 ### Clustering
@@ -262,6 +262,19 @@ for (i in colnames(cell_type_means)) {
 ggplot(plot_dat, aes(x = umap1, y = umap2)) + 
   geom_point(aes(color=umi)) + scale_color_viridis_c()
 ```
+
+## Investigate mature genes
+
+```{r}
+mature_genes <- c("Map2", "Rbfox3")
+index <- match(mature_genes , rowData(sce)$Symbol)
+index <- index[!is.na(index)]
+plot_dat$mature <- colMeans(as.matrix(logcounts(sce[index,])))
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) + 
+  geom_point(aes(color=mature)) + scale_color_viridis_c()
+```
+
 
 ## Trajectory analysis
 

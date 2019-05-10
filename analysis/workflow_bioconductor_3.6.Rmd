@@ -1,0 +1,338 @@
+---
+title: 'snRNA-seq workflow: bioconductor'
+author: "Saskia Freytag"
+date: "08/04/2019"
+output:
+  html_document:
+    toc: true
+    theme: simplex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+```
+
+## Prerequisities 
+
+### Required libraries
+
+```{r libraries}
+library(DropletUtils)
+library(scater)
+library(scran)
+library(batchelor)
+library(umap)
+```
+
+```{r setup-ggplot2}
+library(iSEE)
+library(ggplot2)
+theme_set(theme_classic())
+```
+
+## Import data
+
+### Loading data
+
+Unfortunately, Cell Ranger recently changed its naming convention. The file that
+used to be called `genes.tsv` is now named `features.tsv`. The easiest 
+work-around, until a change to `DropUtils`, is to rename the files.
+
+```{r import}
+samples <- list.files(here::here("data/raw"))
+dat <- lapply(samples, function(x)
+  read10xCounts(here::here("data/raw", x, "mm10")))
+names(dat) <- samples
+```
+
+### Combine data
+
+```{r combine-data}
+for (i in 1:length(samples)) {
+  dat[[i]]$Sample_ID <- samples[i]
+}
+
+sce <- do.call(cbind, dat)
+sce$Sample_ID <- as.factor(sce$Sample_ID)
+```
+
+## Filtering
+
+### Filtering of nuclei
+
+First, we filter any nuclei with greater than 10\% total mitochondrial 
+contamination. 
+
+```{r filter-mito}
+rowData(sce)$Mito <- grepl("^mt-", rowData(sce)$Symbol)
+sce <- calculateQCMetrics(sce,
+  feature_controls = list(Mt = rowData(sce)$Mito)
+)
+
+no_nuclei_mito <- sapply(levels(sce$Sample_ID), function(x)
+  sum((colData(sce)$pct_counts_Mt > 10)[sce$Sample_ID == x]))
+
+paste0(
+  "Nuclei with more than 10% mitochondrial percentage in ", samples, ": ",
+  no_nuclei_mito, " (", round(no_nuclei_mito / sapply(
+    levels(sce$Sample_ID),
+    function(x) sum(sce$Sample_ID == x)
+  ), 2) * 100, "%)"
+)
+
+sce <- sce[, !colData(sce)$pct_counts_Mt > 10]
+```
+
+Next we filter any nuclei that have library sizes three standard below the 
+median. We also filter any nuclei with a number of features three standard
+deaviations below the median.
+
+```{r filter-low}
+libsize_drop <- isOutlier(sce$total_counts,
+  nmads = 3,type = "lower", log = TRUE
+)
+feature_drop <- isOutlier(sce$total_features_by_counts,
+  nmads = 3, type = "lower", log = TRUE
+)
+
+no_nuclei_libsize <- sapply(levels(sce$Sample_ID), function(x)
+  sum(libsize_drop[sce$Sample_ID == x]))
+no_nuclei_feature <- sapply(levels(sce$Sample_ID), function(x)
+  sum(feature_drop[sce$Sample_ID == x]))
+
+paste0(
+  "Nuclei not passing library size filter ", samples, ": ",
+  no_nuclei_libsize, " (", round(no_nuclei_libsize /
+    sapply(
+      levels(sce$Sample_ID),
+      function(x) sum(sce$Sample_ID == x)
+    ), 2) * 100, "%)"
+)
+
+paste0(
+  "Nuclei not passing feature filter ", samples, ": ",
+  no_nuclei_feature, " (", round(no_nuclei_feature /
+    sapply(
+      levels(sce$Sample_ID),
+      function(x) sum(sce$Sample_ID == x)
+    ), 2) * 100, "%)"
+)
+
+sce <- sce[, !(libsize_drop | feature_drop)]
+```
+
+### Filtering of genes
+
+## Filter mitochondrial genes
+
+```{r filter-mito-genes}
+sce <- sce[!rowData(sce)$Mito, ]
+```
+
+## Filter genes by expression
+
+In order to filter genes we need to combine the data. Then we filter any gene
+that is seen in less than 1\% of the data.
+
+```{r filter-genes}
+keep_genes <- apply(counts(sce), 1, function(x)
+  sum(x > 0) > (dim(sce)[2] * 0.01))
+
+sce <- sce[keep_genes, ]
+```
+
+## Normalization
+
+```{r normalization}
+sce <- normalize(sce)
+```
+
+### Batch correction
+
+Perfom mnn correction to generate a common PCA representation for the samples.
+
+```{r batch-correction}
+dat_pca <- batchelor::fastMNN(sce,
+  batch = sce$Sample_ID,
+  k = 50, d = 50, ndist = 10
+)
+
+reducedDim(sce, "corrected") <- reducedDim(dat_pca, "corrected")
+```
+
+Next make a new `SingleCellExperiment`  object with the combined data. In order 
+to ensure that any cell can be traced first make a new sample identifier.
+
+Let's see whether this has improved things.
+
+```{r plotting}
+sce <- runPCA(sce)
+
+plot_dat <- data.frame(
+  pca1 = reducedDim(sce, "PCA")[, 1],
+  pca2 = reducedDim(sce, "PCA")[, 2],
+  mnn1 = reducedDim(sce, "corrected")[, 1],
+  mnn2 = reducedDim(sce, "corrected")[, 2],
+  sample = sce$Sample_ID
+)
+
+ggplot(plot_dat, aes(x = pca1, y = pca2)) +
+  geom_point(aes(col = sample), alpha = 0.5) +
+  scale_colour_brewer(palette = "Set1")
+ggplot(plot_dat, aes(x = mnn1, y = mnn2)) +
+  geom_point(aes(col = sample), alpha = 0.5) +
+  scale_colour_brewer(palette = "Set1")
+```
+
+## Clustering
+
+### Dimension Reduction
+
+```{r umap}
+sce <- runUMAP(sce, use_dimred = "corrected", n_neighbors = 20)
+```
+
+### Clustering
+
+```{r clustering}
+snn.gr <- buildSNNGraph(sce, use.dimred = "UMAP", k = 100)
+clusters <- igraph::cluster_louvain(snn.gr)
+table(clusters$membership, sce$Sample_ID)
+```
+
+```{r plot-clustering}
+sce$Cluster <- factor(clusters$membership)
+
+plot_dat$umap1 <- reducedDim(sce, "UMAP")[, 1]
+plot_dat$umap2 <- reducedDim(sce, "UMAP")[, 2]
+plot_dat$cluster <- sce$Cluster
+plot_dat$umi <- sce$total_counts
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+  geom_point(aes(col = cluster), alpha = 0.5) +
+  scale_colour_brewer(palette = "Set1")
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+  geom_point(aes(col = sample), alpha = 0.5) +
+  scale_colour_brewer(palette = "Set1")
+```
+
+## Annotation
+
+Highlight marker genes for different cell types.
+
+```{r}
+known_markers <- read.table(here::here(
+  "data/meta/",
+  "mouse_brain_cell_type_markers.txt"
+), sep = "\t", fill = TRUE, header = T)
+
+all_cell_types <- sapply(
+  as.character(known_markers$Description),
+  function(x) strsplit(x, ",")[[1]][1]
+)
+known_markers$CellType <- all_cell_types
+
+glia_markers <- sapply(
+  which(known_markers$Neurotransmitter == ""),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " "))
+)
+vglut1_markers <- sapply(
+  grep("VGLUT1", known_markers$Neurotransmitter),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " "))
+)
+vglut2_markers <- sapply(
+  grep("VGLUT2", known_markers$Neurotransmitter),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " "))
+)
+GABA_markers <- sapply(
+  grep("GABA", known_markers$Neurotransmitter),
+  function(x) unlist(strsplit(as.character(known_markers$Markers[x]), " "))
+)
+
+
+markers <- list(
+  gaba = unlist(GABA_markers),
+  glia = unlist(glia_markers),
+  vglut1 = unlist(vglut1_markers),
+  vglut2 = unlist(vglut2_markers)
+)
+
+cell_type_means <- sapply(markers, function(x) {
+  index <- match(x, rowData(sce)$Symbol)
+  index <- index[!is.na(index)]
+  return(colMeans(as.matrix(logcounts(sce[index, ]))))
+})
+colnames(cell_type_means) <- names(markers)
+
+plot_dat <- cbind(plot_dat, cell_type_means)
+
+for (i in colnames(cell_type_means)) {
+  gg <- ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+    geom_point(aes_string(color = i)) + scale_color_viridis_c()
+
+  print(gg)
+}
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+  geom_point(aes(color = umi)) + scale_color_viridis_c()
+```
+
+## Investigate mature genes
+
+```{r}
+mature_genes <- c("Map2", "Rbfox3")
+index <- match(mature_genes, rowData(sce)$Symbol)
+index <- index[!is.na(index)]
+plot_dat$mature <- colMeans(as.matrix(logcounts(sce[index, ])))
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+  geom_point(aes(color = mature)) + scale_color_viridis_c()
+```
+
+## Rescaling of batches
+
+```{r rescaling}
+sce_rescale <- rescaleBatches(sce, batch = sce$Sample_ID)
+```
+
+## Trajectory analysis
+
+Still to come!
+
+## Interactive instance
+
+### iSEE
+
+```{r iSEE}   
+rownames(sce) <- rowData(sce)$Symbol
+sce <- sce [!duplicated(rownames(sce)), ]
+
+fexArg <- featAssayPlotDefaults(sce, 2)
+fexArg$YAxisFeatName <- c("Map2", "Rbfox3")
+fexArg$ColorBy <- c("Column data", "Column data")
+fexArg$ColorByColData <- c("Cluster", "Sample_ID")
+
+rdArgs <- redDimPlotDefaults(sce, 2)
+rdArgs$DataBoxOpen <- FALSE
+rdArgs$Type <- c("UMAP", "corrected")
+rdArgs$ColorBy <- c("Column data", "Column data")
+rdArgs$ColorByColData <- c("Cluster", "Sample_ID")
+rdArgs$XAxis <- c(1, 1)
+rdArgs$YAxis <- c(2, 2)
+
+init <- DataFrame(
+  Name = c(
+    "Reduced dimension plot 1", "Feature assay plot 1",
+    "Reduced dimension plot 2", "Feature assay plot 2"
+  ),
+  Width = c(6, 6)
+)
+
+app <- iSEE(sce,
+  initialPanels = init, featAssayArgs = fexArg,
+  redDimArgs = rdArgs
+)
+```
+
+To initialize simply run `app`.
