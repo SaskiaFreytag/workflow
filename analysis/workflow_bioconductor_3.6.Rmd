@@ -17,27 +17,76 @@ library(here)
 
 ### Required libraries
 
-```{r libraries}
+```{r libraries, message=FALSE}
 library(DropletUtils)
 library(scater)
 library(scran)
 library(batchelor)
 library(umap)
+library(e1071)
 ```
 
-```{r setup-ggplot2}
+```{r setup-ggplot2, message=FALSE}
 library(iSEE)
 library(ggplot2)
 theme_set(theme_classic())
 ```
 
-## Import data
+```{r annotations, message=FALSE}
+library(org.Mm.eg.db)
+library(annotate)
+```
+
+## Overview
+
+This workflow demonstrates the analysis of single cell nuclei RNA-sequencing 
+(snRNA-seq) data from importing the count data, clustering to visualization
+of results with an interactive web browser instance. Since the 10x 
+Genomics protocol is by far the most popular protocol for the generation of this
+type of data, this workflow uses two example datasets provided on their 
+[website](https://support.10xgenomics.com/single-cell-gene-expression/datasets).
+The first dataset contains measurements from ~1,000 nuclei from the brain of a
+E18 mouse. The second dataset contains measurements from ~2,000 nuclei from the
+brain of an adult mouse (>8 weeks). For both datasets we downloaded the files
+contained in the folder named `filtered_gene_bc_matrices`. This folder is 
+produced during processing with the 10x Genomics software [CellRanger](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/what-is-cell-ranger). It 
+contains three files that are required to produce a count table for each cell 
+and gene.
+
+Unfortunately, [CellRanger](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/what-is-cell-ranger) recently changed its naming convention for the 
+files contained within `filtered_gene_bc_matrices`. For this workflow we need to 
+rename the file called `features.tsv` to its earlier naming convention -  `genes.tsv`.  
+
+## Data import
 
 ### Loading data
 
-Unfortunately, Cell Ranger recently changed its naming convention. The file that
-used to be called `genes.tsv` is now named `features.tsv`. The easiest 
-work-around, until a change to `DropUtils`, is to rename the files.
+For this workflow, let's assume the `filtered_gene_bc_matrices` folders for both 
+datasets have been renamed `Adult` and `E18`. Furthermore, assume that these 
+folders are subdirectories of a directory of a directory called `raw`, which is
+a subdirectory of a directory called `data`, resulting in the following file
+structure:
+
+```
+data/
+|-- raw/
+    |-- Adult/
+    |   |-- mm10
+    |-- E18/
+        |-- mm10
+```
+
+First we need to load the data contained in these folders into memory and 
+reconstruct the count matrix. Fortunately, the function `read10xCounts` in the 
+package [DropUtils](https://bioconductor.org/packages/release/bioc/html/DropletUtils.html) 
+takes care of both these tasks. It will store the count matrix as well as 
+relevant meta data regarding genes and cells in a `SingleCellExperiment` object 
+from the 
+[SingleCellExperiment](https://bioconductor.org/packages/3.9/bioc/html/SingleCellExperiment.html) package. 
+
+As we are dealing with multiple datasets, we will use the power of `lapply` in 
+order to automate the loading task. This will result in a list of 
+`SingleCellExperiment` objects, with each corresponding to one of our datasets.
 
 ```{r import}
 samples <- list.files(here::here("data/raw"))
@@ -46,9 +95,16 @@ dat <- lapply(samples, function(x)
 names(dat) <- samples
 ```
 
-### Combine data
+### Combining data
+
+We combine the two objects into a single `SingleCellExperiment` object. However,
+to successfully achieve this we will firstly need to verify that the genes in 
+both objects are in the same order. Secondly, we will create an idenifier for 
+each sample as an additional column in the cell meta information.
 
 ```{r combine-data}
+stopifnot(identical(rownames(dat[1]), rownames(dat[2])))
+
 for (i in 1:length(samples)) {
   dat[[i]]$Sample_ID <- samples[i]
 }
@@ -61,8 +117,20 @@ sce$Sample_ID <- as.factor(sce$Sample_ID)
 
 ### Filtering of nuclei
 
-First, we filter any nuclei with greater than 10\% total mitochondrial 
-contamination. 
+Low-quality nuclei need to be removed in order to ensure that technical effects
+do not distort downstream analysis results. 
+
+#### Filtering nuclei by mitochondrial content
+
+Data from nuclei should not contain any RNA from mitochondrial genes, as these
+can only be found in the cytoplasm. Any nuclei with high mitochondrial content
+points to debris being sequenced instead of a nuclei and should therefore be 
+removed. Hence, we filter any nuclei with greater than 10\% total mitochondrial 
+contamination. To ascertain the mitochondrial content in each nuclei, we use the
+`calculateQCMetrics` from the [scater](https://bioconductor.org/packages/release/bioc/html/scater.html) 
+package. This function will store the percentage of mitochondrial content as 
+well as several other quality metrics for future use in the column meta data of 
+the `SingleCellExperiment` object.
 
 ```{r filter-mito}
 rowData(sce)$Mito <- grepl("^mt-", rowData(sce)$Symbol)
@@ -84,9 +152,16 @@ paste0(
 sce <- sce[, !colData(sce)$pct_counts_Mt > 10]
 ```
 
+#### Filtering nuclei by total RNA content and diversity
+
 Next we filter any nuclei that have library sizes three standard below the 
-median. We also filter any nuclei with a number of features three standard
-deaviations below the median.
+median. We also filter any nuclei with a number of expressed 
+features three standard deviations below the median. Here the library size 
+is defined as the total sum of counts across all genes. The number of expressed 
+features in each cell is defined as the number of features with non-zero counts 
+for that nuclei. Since we already calculated the quality metrics necessary for
+this in the previous step, we will only need to identify which nuclei are 
+three standard deviations below the median for these metrics.
 
 ```{r filter-low}
 libsize_drop <- isOutlier(sce$total_counts,
@@ -124,33 +199,84 @@ sce <- sce[, !(libsize_drop | feature_drop)]
 
 ### Filtering of genes
 
-## Filter mitochondrial genes
+#### Filtering mitochondrial genes
+
+Since mitochondrial genes represent noise, we remove them before further 
+analysis.
 
 ```{r filter-mito-genes}
+no_mito <- sum(rowData(sce)$Mito)
+
 sce <- sce[!rowData(sce)$Mito, ]
+
+paste0(
+  "Mitochondrial genes removed: ", no_mito, "
+   Number of genes remaining:", dim(sce)[1]
+)
+
+
 ```
 
-## Filter genes by expression
+#### Filtering genes by expression
 
-In order to filter genes we need to combine the data. Then we filter any gene
-that is seen in less than 1\% of the data.
+Genes with expression close to zero need do not contain valuable information and
+can in fact distort inference. Thus they should be removed. However there are no
+clear rules regarding which genes should be removed. It depends on your as much
+on your downstream analysis as your dataset. Here we will filter any gene
+that is seen in less than 1\% of all nuclei. This represents a good initial 
+compromise between very harsh filtering, which may result in some cell types 
+going undetected and too lenient filtering, which may result in underpowered
+tests and problems with discreteness during normalization.
 
 ```{r filter-genes}
 keep_genes <- apply(counts(sce), 1, function(x)
   sum(x > 0) > (dim(sce)[2] * 0.01))
 
 sce <- sce[keep_genes, ]
+
+paste0(
+  "Low-abundance genes removed: ", sum(!keep_genes), "
+   Number of genes remaining:", dim(sce)[1]
+)
 ```
 
 ## Normalization
+
+### Library size normalization
+
+Before quantitative downstream analysis we need to normalize the data, since 
+different nuclei have different capture efficiencies resulting in vastly 
+different library sizes. The simplest way to remove this bias is to scale the
+count data in every nuclei by its nuclei. Importantly, note that this assumes
+that most genes are not differentially expressed between any two cells. 
 
 ```{r normalization}
 sce <- normalize(sce)
 ```
 
-### Batch correction
+### Performing batch correction
 
-Perfom mnn correction to generate a common PCA representation for the samples.
+In this single cell analysis, the different samples constitute different 
+batches, as their libraries were generated at different times. Batch effects can
+interfere with statistical inference and thus should be explicitly modelled or
+removed. Since explicit modelling is not easily possible for clustering, we will 
+remove the batch effect using a strategy that relies on mutual nearest 
+neighbours (MNNs). 
+
+MNNs are pairs of cells that fullfill the following conditions: Each cell is 
+from a different batch. They are within each other’s set of k nearest neighbors. 
+We assume that the cells within an MNN pair are from the same cell type and 
+should thus have similar expression. Assuming that the batch effect is 
+orthogonal to the biological subspace this information can be used to remove the
+batch effect - the difference between the paired cells.
+
+Using the `fastMNN()` function from the 
+[batchelor](https://bioconductor.org/packages/devel/bioc/html/batchelor.html)
+package we will perform
+MNN correction on the principal components. MNN identification and correction 
+performed in a low-dimensional space offers some advantages with respect to 
+speed and is sufficient for the downstream steps of clustering, annotation and
+visualization.
 
 ```{r batch-correction}
 dat_pca <- batchelor::fastMNN(sce,
@@ -161,10 +287,16 @@ dat_pca <- batchelor::fastMNN(sce,
 reducedDim(sce, "corrected") <- reducedDim(dat_pca, "corrected")
 ```
 
-Next make a new `SingleCellExperiment`  object with the combined data. In order 
-to ensure that any cell can be traced first make a new sample identifier.
-
-Let's see whether this has improved things.
+In order to see how this has worked we will visualize both the nuclei from both 
+datasets in their principal component analysis (PCA) representation 
+and in their MNN corrected PCA representation. Visualization of the nuclei in a 
+lower dimension as computed with PCA highlights the relationships. Nuclei with 
+similar expression are located closer to each other.
+In the uncorrected PCA representation we can see that the nuclei
+clearly cluster by batches. Once we use the MNN corrected PCA representation
+we find that we have some overlap of both datasets. Note we would not expect a
+strong overlap as the two samples are from very different developmental times, 
+each with its distinct cell types.
 
 ```{r plotting}
 sce <- runPCA(sce)
@@ -174,7 +306,8 @@ plot_dat <- data.frame(
   pca2 = reducedDim(sce, "PCA")[, 2],
   mnn1 = reducedDim(sce, "corrected")[, 1],
   mnn2 = reducedDim(sce, "corrected")[, 2],
-  sample = sce$Sample_ID
+  sample = sce$Sample_ID,
+  umi = sce$total_counts
 )
 
 ggplot(plot_dat, aes(x = pca1, y = pca2)) +
@@ -187,41 +320,93 @@ ggplot(plot_dat, aes(x = mnn1, y = mnn2)) +
 
 ## Clustering
 
-### Dimension Reduction
+### Calculating dimension reduction
+
+With many nuclei visualization in PCA representation is not optimal, as nuclei 
+from different populations may not be separated. A more appropriate dimension
+reduction technique in this situtation is the Uniform Manifold Approximation and
+Projection (UMAP). Unlike other advanced dimension reduction techniques, it 
+presevers local and global structure, whilst having a shorter run time. Note
+that the UMAP representation takes the corrected principal components in its 
+calculation thus also producing a batch-corrected dimension reduction.
 
 ```{r umap}
 sce <- runUMAP(sce, use_dimred = "corrected", n_neighbors = 20)
 ```
 
-### Clustering
-
-```{r clustering}
-snn.gr <- buildSNNGraph(sce, use.dimred = "UMAP", k = 100)
-clusters <- igraph::cluster_louvain(snn.gr)
-table(clusters$membership, sce$Sample_ID)
-```
-
-```{r plot-clustering}
-sce$Cluster <- factor(clusters$membership)
-
+```{r umap-plot}
 plot_dat$umap1 <- reducedDim(sce, "UMAP")[, 1]
 plot_dat$umap2 <- reducedDim(sce, "UMAP")[, 2]
-plot_dat$cluster <- sce$Cluster
-plot_dat$umi <- sce$total_counts
 
-ggplot(plot_dat, aes(x = umap1, y = umap2)) +
-  geom_point(aes(col = cluster), alpha = 0.5) +
-  scale_colour_brewer(palette = "Set1")
 ggplot(plot_dat, aes(x = umap1, y = umap2)) +
   geom_point(aes(col = sample), alpha = 0.5) +
   scale_colour_brewer(palette = "Set1")
 ```
 
+### Filtering apoptotic nuclei
+
+We suspect that some of the nuclei clustering far from the bulk, contain 
+apoptotic nuclei. In order to verify this we overlay the UMAP representation of 
+all nuclei with their summed expression of all genes in the GO apoptosis 
+pathway. It turns out that the nuclei are not apoptotic and are therefore not 
+removed. **Note that if nuclei were removed, it is imperative that all 
+dimension reduction representations are recalculated!**
+
+```{r apoptotic}
+go_entrez_id <- get("GO:0006915", revmap(org.Mm.egGO))
+apoptotic_genes <- unlist(mget(go_entrez_id , org.Mm.egENSEMBL))
+
+index_apoptotic <- match(apoptotic_genes, rownames(sce))
+index_apoptotic <- index_apoptotic[!is.na(index_apoptotic)]
+plot_dat$apoptotic <- colMeans(counts(sce)[index_apoptotic, ])/plot_dat$umi
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+  geom_point(aes(col = apoptotic), alpha = 0.5) +
+  scale_color_viridis_c()
+```
+
+### Building neighbour graph and clustering
+
+We use the corrected principal components for clustering. Note that it would be 
+a bad idea to use the UMAP representation as they are distorted. Furthermore, 
+using the UMAP representation for plotting the independently arisen clustering
+is a great sanity check. We will perform nuclei by building a shared nearest
+neighbour (SNN) graph with the function in `buildSNNGraph` in 
+[scran](https://bioconductor.org/packages/release/bioc/html/scran.html). Here we
+choose to set `k=50`, which determines the number of clusters. As a general rule
+with more nuclei in your dataset this should be increased. After generating the
+SNN, we will use the Louvain algorithm to identify clusters.
+
+```{r clustering}
+snn_gr <- buildSNNGraph(sce, use.dimred = "corrected", k = 50)
+clusters <- igraph::cluster_louvain(snn_gr)
+table(clusters$membership, sce$Sample_ID)
+```
+
+Finally we will visualize each nuclei's cluster membership in the UMAP 
+representation of the data. 
+
+```{r plot-clustering}
+sce$Cluster <- factor(clusters$membership)
+
+plot_dat$cluster <- sce$Cluster
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+  geom_point(aes(col = cluster), alpha = 0.5) +
+  scale_colour_brewer(palette = "Set1")
+```
+
 ## Annotation
 
-Highlight marker genes for different cell types.
+### Classifying nuclei by marker genes
 
-```{r}
+We downloaded marker genes for all cell types in the mouse from 
+[mousebrain.org](http://mousebrain.org/celltypes/). Using this we can 
+visualize the main cell populations in the UMAP representation. We do this by
+summarizing the expression of marker genes for the main cell populations.
+This shows that all major cell populations are present in the sample.
+
+```{r marker-classify}
 known_markers <- read.table(here::here(
   "data/meta/",
   "mouse_brain_cell_type_markers.txt"
@@ -269,22 +454,24 @@ plot_dat <- cbind(plot_dat, cell_type_means)
 
 for (i in colnames(cell_type_means)) {
   gg <- ggplot(plot_dat, aes(x = umap1, y = umap2)) +
-    geom_point(aes_string(color = i)) + scale_color_viridis_c()
+    geom_point(aes_string(color = i), alpha=0.5) + scale_color_viridis_c()
 
   print(gg)
 }
-
-ggplot(plot_dat, aes(x = umap1, y = umap2)) +
-  geom_point(aes(color = umi)) + scale_color_viridis_c()
 ```
 
-## Investigate mature genes
+### Classifying nuclei by reference
+
+```{r ref-classify}
+```
+
+### Investigating mature genes
 
 ```{r}
 mature_genes <- c("Map2", "Rbfox3")
-index <- match(mature_genes, rowData(sce)$Symbol)
-index <- index[!is.na(index)]
-plot_dat$mature <- colMeans(as.matrix(logcounts(sce[index, ])))
+index_mature <- match(mature_genes, rowData(sce)$Symbol)
+index_mature <- index_mature[!is.na(index_mature)]
+plot_dat$mature <- colMeans(as.matrix(logcounts(sce[index_mature, ])))
 
 ggplot(plot_dat, aes(x = umap1, y = umap2)) +
   geom_point(aes(color = mature)) + scale_color_viridis_c()
@@ -302,7 +489,14 @@ Still to come!
 
 ## Interactive instance
 
-### iSEE
+### Setting up iSEE
+
+Next we will use the [iSEE](https://github.com/csoneson/iSEE) package to provide
+an interactive user interface for sharing and exploring the data further. 
+It is extremely easy to set this up when data and analysis results are stored in 
+a `SingleCellExperiment` object, as we have done during this workflow. The user
+interface is implemented with [RStudio's Shiny](https://shiny.rstudio.com/), 
+with a multi-panel setup for ease of navigation.
 
 ```{r iSEE}   
 rownames(sce) <- rowData(sce)$Symbol
