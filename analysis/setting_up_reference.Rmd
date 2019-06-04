@@ -1,0 +1,141 @@
+---
+title: "Reference Dataset"
+author: "Saskia Freytag"
+date: "03/06/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+```
+
+```{r libraries, message=FALSE}
+library(scater)
+library(scran)
+library(batchelor)
+library(umap)
+library(data.table)
+```
+
+```{r annotations, message=FALSE}
+library(org.Mm.eg.db)
+library(annotate)
+```
+
+## Data Import
+
+```{r data-import}
+col_ref <- as.data.frame(fread(here::here("data/meta/allen_mouse_brain_atlas", 
+                            "mouse_VISp_2018-06-14_samples-columns.csv")))
+rownames(col_ref) <- col_ref$sample_name
+
+row_ref <- as.data.frame(fread(here::here("data/meta/allen_mouse_brain_atlas", 
+                            "mouse_VISp_2018-06-14_genes-rows.csv")))
+rownames(row_ref) <- row_ref$gene_entrez_id
+  
+exons_ref <- as.data.frame(fread(here::here("data/meta/allen_mouse_brain_atlas",
+                           "mouse_VISp_2018-06-14_exon-matrix.csv")))
+rownames(exons_ref) <- exons_ref$V1
+exons_ref <- exons_ref[,-1]
+
+introns_ref <- as.data.frame(fread(here::here("data/meta/allen_mouse_brain_atlas",
+                           "mouse_VISp_2018-06-14_intron-matrix.csv")))
+rownames(introns_ref) <- introns_ref$V1
+introns_ref <- introns_ref[,-1]
+
+counts_ref <- exons_ref + introns_ref
+
+ref_sce <- SingleCellExperiment(
+    assays = list(counts = as.matrix(counts_ref)), 
+    colData = col_ref,
+    rowData = row_ref
+)
+```
+
+```{r}
+rm("col_ref", "row_ref", "exons_ref", "introns_ref", "counts_ref")
+gc()
+```
+
+## Adding Gene Annotation 
+
+```{r}
+ens <- sapply(rowData(ref_sce)$gene_entrez_id, function(x) 
+  try(mget(as.character(x), org.Mm.egENSEMBL)))
+ens1 <- unlist(sapply(ens, function(x) x[1]))
+ens1[grepl("Error", ens1)] <- NA
+
+ref_sce <- ref_sce[!is.na(ens1), ]
+ens1 <- ens1[!is.na(ens1)]
+
+rowData(ref_sce)$gene_ens <- ens1
+```
+
+## Filter nuclei
+
+```{r filter-mito}
+rowData(ref_sce)$Mito <- grepl("^Mt-", rowData(ref_sce)$gene_symbol)
+ref_sce <- calculateQCMetrics(ref_sce,
+  feature_controls = list(Mt = rowData(ref_sce)$Mito)
+)
+
+paste0("Number of nuclei with more than 10% mitochondial content: ", 
+       sum(colData(ref_sce)$pct_counts_Mt > 10))
+
+ref_sce <- ref_sce[, !colData(ref_sce)$pct_counts_Mt > 10]
+```
+
+```{r filter-low}
+libsize_drop <- isOutlier(ref_sce$total_counts,
+  nmads = 3,type = "lower", log = TRUE
+)
+feature_drop <- isOutlier(ref_sce$total_features_by_counts,
+  nmads = 3, type = "lower", log = TRUE
+)
+
+paste0( "Nuclei not passing library size filter: ",
+  sum(libsize_drop)
+)
+
+paste0( "Nuclei not passing feature filter: ", 
+  sum(feature_drop)
+)
+
+ref_sce <- ref_sce[, !(libsize_drop | feature_drop)]
+```
+
+## Filter genes
+
+```{r filter-genes}
+keep_genes <- apply(counts(ref_sce), 1, function(x)
+  sum(x > 0) > (dim(ref_sce)[2] * 0.01))
+
+ref_sce <- ref_sce[keep_genes, ]
+
+paste0("Low-abundance genes removed: ", sum(!keep_genes))
+paste0("Number of genes remaining: ", dim(ref_sce)[1])
+```
+
+## Normalization
+
+```{r normalization}
+ref_sce <- normalize(ref_sce)
+```
+
+## Identification of highly variable genes
+
+```{r highly-variable}
+var_fit <- trendVar(ref_sce, use.spikes=FALSE)
+var_out <- decomposeVar(ref_sce, var_fit)
+
+rowData(ref_sce)$hvg <- (var_out$FDR <= 0.05 & var_out$bio >= 0.5)
+
+sum(rowData(ref_sce)$hvg)
+```
+
+## Save the reference dataset
+
+```{r }
+saveRDS(ref_sce, here::here("data/meta/", "allen_mouse_atlas.rds"))
+```

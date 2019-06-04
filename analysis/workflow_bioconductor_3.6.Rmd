@@ -23,7 +23,7 @@ library(scater)
 library(scran)
 library(batchelor)
 library(umap)
-library(e1071)
+library(caret)
 ```
 
 ```{r setup-ggplot2, message=FALSE}
@@ -209,12 +209,8 @@ no_mito <- sum(rowData(sce)$Mito)
 
 sce <- sce[!rowData(sce)$Mito, ]
 
-paste0(
-  "Mitochondrial genes removed: ", no_mito, "
-   Number of genes remaining:", dim(sce)[1]
-)
-
-
+paste0("Mitochondrial genes removed: ", no_mito)
+paste0("Number of genes remaining: ", dim(sce)[1])
 ```
 
 #### Filtering genes by expression
@@ -234,10 +230,8 @@ keep_genes <- apply(counts(sce), 1, function(x)
 
 sce <- sce[keep_genes, ]
 
-paste0(
-  "Low-abundance genes removed: ", sum(!keep_genes), "
-   Number of genes remaining:", dim(sce)[1]
-)
+paste0("Low-abundance genes removed: ", sum(!keep_genes))
+paste0("Number of genes remaining: ", dim(sce)[1])
 ```
 
 ## Normalization
@@ -358,7 +352,7 @@ apoptotic_genes <- unlist(mget(go_entrez_id , org.Mm.egENSEMBL))
 
 index_apoptotic <- match(apoptotic_genes, rownames(sce))
 index_apoptotic <- index_apoptotic[!is.na(index_apoptotic)]
-plot_dat$apoptotic <- colMeans(counts(sce)[index_apoptotic, ])/plot_dat$umi
+plot_dat$apoptotic <- colMeans(logcounts(sce)[index_apoptotic, ])
 
 ggplot(plot_dat, aes(x = umap1, y = umap2)) +
   geom_point(aes(col = apoptotic), alpha = 0.5) +
@@ -463,6 +457,53 @@ for (i in colnames(cell_type_means)) {
 ### Classifying nuclei by reference
 
 ```{r ref-classify}
+ref_sce <- readRDS(here::here("data/meta/", "allen_mouse_atlas.rds"))
+
+ind_common <- match(rownames(sce), rowData(ref_sce)$gene_ens)
+ind_common_na <- which(is.na(ind_common))
+ind_common <- ind_common[-ind_common_na]
+
+ref_sce <- ref_sce[ind_common, ]
+hgv_ref_sce <- rowData(ref_sce)$gene_ens[rowData(ref_sce)$hvg]
+
+ref_train <- data.frame(colData(ref_sce)$subclass,
+                        t(counts(ref_sce)[rowData(ref_sce)$hvg, ]))
+colnames(ref_train) <- c("subclass", hgv_ref_sce)
+
+remove_subclasses <- c(names(table(ref_train$subclass))
+                       [table(ref_train$subclass)<10],
+          "Batch Grouping", "Doublet", "High Intronic", "Low Quality",
+          "No Class") 
+
+ind_rm_sc <- match(ref_train$subclass, remove_subclasses)
+ind_rm_sc <- which(!is.na(ind_rm_sc))
+
+ref_train <- ref_train[-ind_rm_sc, ]
+ref_train$subclass <- as.factor(as.character(ref_train$subclass ))
+
+descrCor <-  cor(ref_train[,-1])
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
+ref_train <- ref_train[,-(highlyCorDescr+1)]
+
+hgv_ref_sce <- colnames(ref_train)[-1]
+
+ref_test <- data.frame(t(as.matrix(counts(sce)
+    [match(hgv_ref_sce, rownames(sce)), ])))
+  
+fitControl <- trainControl(method = "none")
+
+svmFit <- train(subclass ~ ., data = ref_train, 
+                method = "svmRadial", 
+                trControl = fitControl, 
+                preProc = c("center", "scale"),
+                tuneGrid = data.frame(C = 8,
+                                      sigma = 0.0001560391))
+
+plot_dat$pred <- predict(svmFit, newdata = ref_test)
+
+ggplot(plot_dat, aes(x = umap1, y = umap2)) +
+  geom_point(aes(col = pred), alpha = 0.5) +
+  scale_colour_brewer(palette = "Set1")
 ```
 
 ### Investigating mature genes
@@ -529,4 +570,4 @@ app <- iSEE(sce,
 )
 ```
 
-To initialize simply run `app`.
+To initialize simply run `app` to launch the web instance.
