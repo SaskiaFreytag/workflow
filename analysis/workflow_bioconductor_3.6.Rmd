@@ -6,6 +6,7 @@ output:
   html_document:
     toc: true
     theme: simplex
+bibliography: /Users/saskiafreytag/workflow/bib.bibtex
 ---
 
 ```{r setup, include=FALSE}
@@ -123,7 +124,7 @@ do not distort downstream analysis results.
 #### Filtering nuclei by mitochondrial content
 
 Data from nuclei should not contain any RNA from mitochondrial genes, as these
-can only be found in the cytoplasm. Any nuclei with high mitochondrial content
+can only be found in the cytoplasm [@nagy2018]. Any nuclei with high mitochondrial content
 points to debris being sequenced instead of a nuclei and should therefore be 
 removed. Hence, we filter any nuclei with greater than 10\% total mitochondrial 
 contamination. To ascertain the mitochondrial content in each nuclei, we use the
@@ -159,7 +160,7 @@ median. We also filter any nuclei with a number of expressed
 features three standard deviations below the median. Here the library size 
 is defined as the total sum of counts across all genes. The number of expressed 
 features in each cell is defined as the number of features with non-zero counts 
-for that nuclei. Since we already calculated the quality metrics necessary for
+for that nuclei [@lun2016]. Since we already calculated the quality metrics necessary for
 this in the previous step, we will only need to identify which nuclei are 
 three standard deviations below the median for these metrics.
 
@@ -217,7 +218,7 @@ paste0("Number of genes remaining: ", dim(sce)[1])
 
 Genes with expression close to zero need do not contain valuable information and
 can in fact distort inference. Thus they should be removed. However there are no
-clear rules regarding which genes should be removed. It depends on your as much
+clear rules regarding which genes should be removed [@cole2019]. It depends on your as much
 on your downstream analysis as your dataset. Here we will filter any gene
 that is seen in less than 1\% of all nuclei. This represents a good initial 
 compromise between very harsh filtering, which may result in some cell types 
@@ -240,7 +241,7 @@ paste0("Number of genes remaining: ", dim(sce)[1])
 
 Before quantitative downstream analysis we need to normalize the data, since 
 different nuclei have different capture efficiencies resulting in vastly 
-different library sizes. The simplest way to remove this bias is to scale the
+different library sizes [@lun2016]. The simplest way to remove this bias is to scale the
 count data in every nuclei by its nuclei. Importantly, note that this assumes
 that most genes are not differentially expressed between any two cells. 
 
@@ -255,7 +256,7 @@ batches, as their libraries were generated at different times. Batch effects can
 interfere with statistical inference and thus should be explicitly modelled or
 removed. Since explicit modelling is not easily possible for clustering, we will 
 remove the batch effect using a strategy that relies on mutual nearest 
-neighbours (MNNs). 
+neighbours (MNNs) [@haghverdi2018]. 
 
 MNNs are pairs of cells that fullfill the following conditions: Each cell is 
 from a different batch. They are within each other’s set of k nearest neighbors. 
@@ -319,7 +320,7 @@ ggplot(plot_dat, aes(x = mnn1, y = mnn2)) +
 With many nuclei visualization in PCA representation is not optimal, as nuclei 
 from different populations may not be separated. A more appropriate dimension
 reduction technique in this situtation is the Uniform Manifold Approximation and
-Projection (UMAP). Unlike other advanced dimension reduction techniques, it 
+Projection (UMAP) [@mcinnes2018]. Unlike other advanced dimension reduction techniques, it 
 presevers local and global structure, whilst having a shorter run time. Note
 that the UMAP representation takes the corrected principal components in its 
 calculation thus also producing a batch-corrected dimension reduction.
@@ -340,7 +341,8 @@ ggplot(plot_dat, aes(x = umap1, y = umap2)) +
 ### Filtering apoptotic nuclei
 
 We suspect that some of the nuclei clustering far from the bulk, contain 
-apoptotic nuclei. In order to verify this we overlay the UMAP representation of 
+apoptotic nuclei. These should be removed as they can distort analysis [@lun2016].
+In order to verify this we overlay the UMAP representation of 
 all nuclei with their summed expression of all genes in the GO apoptosis 
 pathway. It turns out that the nuclei are not apoptotic and are therefore not 
 removed. **Note that if nuclei were removed, it is imperative that all 
@@ -365,11 +367,11 @@ We use the corrected principal components for clustering. Note that it would be
 a bad idea to use the UMAP representation as they are distorted. Furthermore, 
 using the UMAP representation for plotting the independently arisen clustering
 is a great sanity check. We will perform nuclei by building a shared nearest
-neighbour (SNN) graph with the function in `buildSNNGraph` in 
+neighbour (SNN) [@xu2015] graph with the function in `buildSNNGraph` in 
 [scran](https://bioconductor.org/packages/release/bioc/html/scran.html). Here we
 choose to set `k=50`, which determines the number of clusters. As a general rule
 with more nuclei in your dataset this should be increased. After generating the
-SNN, we will use the Louvain algorithm to identify clusters.
+SNN, we will use the Louvain algorithm [@de2011] to identify clusters.
 
 ```{r clustering}
 snn_gr <- buildSNNGraph(sce, use.dimred = "corrected", k = 50)
@@ -395,7 +397,7 @@ ggplot(plot_dat, aes(x = umap1, y = umap2)) +
 ### Classifying nuclei by marker genes
 
 We downloaded marker genes for all cell types in the mouse from 
-[mousebrain.org](http://mousebrain.org/celltypes/). Using this we can 
+[mousebrain.org](http://mousebrain.org/celltypes/) [@zeisel2018]. Using this we can 
 visualize the main cell populations in the UMAP representation. We do this by
 summarizing the expression of marker genes for the main cell populations.
 This shows that all major cell populations are present in the sample.
@@ -454,57 +456,51 @@ for (i in colnames(cell_type_means)) {
 }
 ```
 
-### Classifying nuclei by reference
+We also downloaded marker genes for all cell types from the human brain from 
+@velmeshev2019. Using this we can 
+visualize the finer cell populations in the UMAP representation. We do this by
+again summarizing the expression of marker genes for the main cell populations.
 
-```{r ref-classify}
-ref_sce <- readRDS(here::here("data/meta/", "allen_mouse_atlas.rds"))
+```{r}
+human_markers <- readxl::read_xls(here::here(
+  "data/meta/",
+  "brain_cluster_genes_aav8130_Data-S3.xls"
+))
 
-ind_common <- match(rownames(sce), rowData(ref_sce)$gene_ens)
-ind_common_na <- which(is.na(ind_common))
-ind_common <- ind_common[-ind_common_na]
+all_cell_types <- unique(human_markers$`Cell type`)
 
-ref_sce <- ref_sce[ind_common, ]
-hgv_ref_sce <- rowData(ref_sce)$gene_ens[rowData(ref_sce)$hvg]
+cell_type_means <- sapply(all_cell_types, function(x) {
+  markers <- human_markers$`Gene name`[human_markers$`Cell type`==x]
+  index <- match(tolower(markers), tolower(rowData(sce)$Symbol))
+  index <- index[!is.na(index)]
+  return(colMeans(as.matrix(logcounts(sce[index, ]))))
+})
 
-ref_train <- data.frame(colData(ref_sce)$subclass,
-                        t(counts(ref_sce)[rowData(ref_sce)$hvg, ]))
-colnames(ref_train) <- c("subclass", hgv_ref_sce)
+colnames(cell_type_means) <- gsub("/", "_", colnames(cell_type_means))
+colnames(cell_type_means) <- gsub("-", "_", colnames(cell_type_means))
 
-remove_subclasses <- c(names(table(ref_train$subclass))
-                       [table(ref_train$subclass)<10],
-          "Batch Grouping", "Doublet", "High Intronic", "Low Quality",
-          "No Class") 
+plot_dat1 <- plot_dat[, c("umap1", "umap2")]
+plot_dat1 <- cbind(plot_dat1, cell_type_means)
 
-ind_rm_sc <- match(ref_train$subclass, remove_subclasses)
-ind_rm_sc <- which(!is.na(ind_rm_sc))
+for (i in colnames(cell_type_means)) {
+  gg <- ggplot(plot_dat1, aes(x = umap1, y = umap2)) +
+    geom_point(aes_string(color = i), alpha=0.5) + scale_color_viridis_c()
 
-ref_train <- ref_train[-ind_rm_sc, ]
-ref_train$subclass <- as.factor(as.character(ref_train$subclass ))
+  print(gg)
+}
 
-descrCor <-  cor(ref_train[,-1])
-highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
-ref_train <- ref_train[,-(highlyCorDescr+1)]
-
-hgv_ref_sce <- colnames(ref_train)[-1]
-
-ref_test <- data.frame(t(as.matrix(counts(sce)
-    [match(hgv_ref_sce, rownames(sce)), ])))
-  
-fitControl <- trainControl(method = "none")
-
-svmFit <- train(subclass ~ ., data = ref_train, 
-                method = "svmRadial", 
-                trControl = fitControl, 
-                preProc = c("center", "scale"),
-                tuneGrid = data.frame(C = 8,
-                                      sigma = 0.0001560391))
-
-plot_dat$pred <- predict(svmFit, newdata = ref_test)
-
-ggplot(plot_dat, aes(x = umap1, y = umap2)) +
-  geom_point(aes(col = pred), alpha = 0.5) +
-  scale_colour_brewer(palette = "Set1")
 ```
+
+
+## Rescaling of batches
+
+```{r rescaling}
+sce_rescale <- rescaleBatches(sce, batch = sce$Sample_ID)
+```
+
+## Trajectory analysis
+
+Still to come!
 
 ### Investigating mature genes
 
@@ -517,16 +513,6 @@ plot_dat$mature <- colMeans(as.matrix(logcounts(sce[index_mature, ])))
 ggplot(plot_dat, aes(x = umap1, y = umap2)) +
   geom_point(aes(color = mature)) + scale_color_viridis_c()
 ```
-
-## Rescaling of batches
-
-```{r rescaling}
-sce_rescale <- rescaleBatches(sce, batch = sce$Sample_ID)
-```
-
-## Trajectory analysis
-
-Still to come!
 
 ## Interactive instance
 
@@ -571,3 +557,5 @@ app <- iSEE(sce,
 ```
 
 To initialize simply run `app` to launch the web instance.
+
+# References
