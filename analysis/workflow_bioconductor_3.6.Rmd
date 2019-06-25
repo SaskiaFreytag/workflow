@@ -24,7 +24,7 @@ library(scater)
 library(scran)
 library(batchelor)
 library(umap)
-library(caret)
+library(schex)
 ```
 
 ```{r setup-ggplot2, message=FALSE}
@@ -126,7 +126,7 @@ do not distort downstream analysis results.
 Data from nuclei should not contain any RNA from mitochondrial genes, as these
 can only be found in the cytoplasm [@nagy2018]. Any nuclei with high mitochondrial content
 points to debris being sequenced instead of a nuclei and should therefore be 
-removed. Hence, we filter any nuclei with greater than 10\% total mitochondrial 
+removed [@luecken2019]. Hence, we filter any nuclei with greater than 10\% total mitochondrial 
 contamination. To ascertain the mitochondrial content in each nuclei, we use the
 `calculateQCMetrics` from the [scater](https://bioconductor.org/packages/release/bioc/html/scater.html) 
 package. This function will store the percentage of mitochondrial content as 
@@ -242,12 +242,46 @@ paste0("Number of genes remaining: ", dim(sce)[1])
 Before quantitative downstream analysis we need to normalize the data, since 
 different nuclei have different capture efficiencies resulting in vastly 
 different library sizes [@lun2016]. The simplest way to remove this bias is to scale the
-count data in every nuclei by its nuclei. Importantly, note that this assumes
-that most genes are not differentially expressed between any two cells. 
+count data in every nuclei by its total count. Importantly, note that this assumes
+that most genes are not differentially expressed between any two cells. It has been
+shown that this performs similarly to more complex normalizations [@lun2016; @cole2019].
 
 ```{r normalization}
 sce <- normalize(sce)
 ```
+
+### Principal component analysis
+
+We will first run a principal component analysis (PCA). This calculates an
+orthogonal transformation of the data into a set of linearly uncorrelated 
+variables called principal components. We will intially calculate 50 principle
+components using the top 1000 most variable genes. While reduction dimension
+methods have been shown to be reasonably robust to the number of highly variable
+genes chosen, a number greater than 500 is generally suggested [@klein2015].
+
+```{r pca}
+sce <- runPCA(sce, ncomponents=50, ntop=1000)
+```
+
+Principle components do not contribute equally; i.e. the first principle 
+components explain a higher percentage of the variance observed in the data than
+the bottom principle components. For our downstream analysis we want to include
+only the principle components that contain significant information. A common 
+method for this is a “scree plot” [@nguyen2019]. A scree plot simply shows the percentage of
+variance explained corresponding to each of the principle components. Ww want to
+identify a cutoff point, in which the variance explained drops significantly 
+below the level of the one immediately preceding it — the so-called "elbow" point. 
+Here we see this point for principle component 4.
+
+```{r decide-pca}
+pca_comp <- data.frame(var_exp=attr(sce@reducedDims$PCA, "percentVar"),
+    component=1:length(attr(sce@reducedDims$PCA, "percentVar")))
+pca_comp$label <- paste0("PC", pca_comp$component)
+
+ggplot(pca_comp, aes(x=component, y=var_exp, label=label)) + 
+  geom_text(angle=45) + theme_classic()
+```
+
 
 ### Performing batch correction
 
@@ -265,7 +299,9 @@ should thus have similar expression. Assuming that the batch effect is
 orthogonal to the biological subspace this information can be used to remove the
 batch effect - the difference between the paired cells.
 
-Using the `fastMNN()` function from the 
+MNN has been shown to perform the best in a comprehensive benchmarking study 
+using experimental mixture data [@tian2019]. Furthermore, it is implemented in
+the easy-to-use `fastMNN()` function from the 
 [batchelor](https://bioconductor.org/packages/devel/bioc/html/batchelor.html)
 package we will perform
 MNN correction on the principal components. MNN identification and correction 
@@ -276,14 +312,14 @@ visualization.
 ```{r batch-correction}
 dat_pca <- batchelor::fastMNN(sce,
   batch = sce$Sample_ID,
-  k = 50, d = 50, ndist = 10
+  k = 50, d = 4, ndist = 10
 )
 
 reducedDim(sce, "corrected") <- reducedDim(dat_pca, "corrected")
 ```
 
 In order to see how this has worked we will visualize both the nuclei from both 
-datasets in their principal component analysis (PCA) representation 
+datasets in their PCA representation 
 and in their MNN corrected PCA representation. Visualization of the nuclei in a 
 lower dimension as computed with PCA highlights the relationships. Nuclei with 
 similar expression are located closer to each other.
@@ -294,8 +330,6 @@ strong overlap as the two samples are from very different developmental times,
 each with its distinct cell types.
 
 ```{r plotting}
-sce <- runPCA(sce)
-
 plot_dat <- data.frame(
   pca1 = reducedDim(sce, "PCA")[, 1],
   pca2 = reducedDim(sce, "PCA")[, 2],
@@ -321,7 +355,9 @@ With many nuclei visualization in PCA representation is not optimal, as nuclei
 from different populations may not be separated. A more appropriate dimension
 reduction technique in this situtation is the Uniform Manifold Approximation and
 Projection (UMAP) [@mcinnes2018]. Unlike other advanced dimension reduction techniques, it 
-presevers local and global structure, whilst having a shorter run time. Note
+presevers local and global structure, whilst having a shorter run time. Furthermore,
+it has been shown by @becht2019 that it also provides the most reproducibility and
+most meaningful organization of cells into clusters. Note
 that the UMAP representation takes the corrected principal components in its 
 calculation thus also producing a batch-corrected dimension reduction.
 
@@ -336,6 +372,22 @@ plot_dat$umap2 <- reducedDim(sce, "UMAP")[, 2]
 ggplot(plot_dat, aes(x = umap1, y = umap2)) +
   geom_point(aes(col = sample), alpha = 0.5) +
   scale_colour_brewer(palette = "Set1")
+```
+
+### Calculate hexagon cell representation
+
+Hexagon cell plotting of one of the dimension reductions is an excellent
+alternative to traditional plotting. In particular, it can have huge 
+advantages when the number of nuclei is very large. In such cases points are 
+typically plotted on top of each other. With hexagon cell plotting the cells
+in a close vicinty are instead summarized, thus avoiding overplotting. In order
+to see whether we have chosen the right number of hexagon cells (controlled by
+the parameter `nbins`), we will first plot the number of nuclei in each hexagon
+cell. This should reveal a roughly even plot.
+
+```{r hexagon}
+sce <- make_hexbin(sce, nbins=40, dimension_reduction = "UMAP")
+plot_hexbin_density(sce)
 ```
 
 ### Filtering apoptotic nuclei
@@ -354,11 +406,9 @@ apoptotic_genes <- unlist(mget(go_entrez_id , org.Mm.egENSEMBL))
 
 index_apoptotic <- match(apoptotic_genes, rownames(sce))
 index_apoptotic <- index_apoptotic[!is.na(index_apoptotic)]
-plot_dat$apoptotic <- colMeans(logcounts(sce)[index_apoptotic, ])
+colData(sce)$apoptotic <- colMeans(logcounts(sce)[index_apoptotic, ])
 
-ggplot(plot_dat, aes(x = umap1, y = umap2)) +
-  geom_point(aes(col = apoptotic), alpha = 0.5) +
-  scale_color_viridis_c()
+plot_hexbin_meta(sce, col="apoptotic", action="mean")
 ```
 
 ### Building neighbour graph and clustering
@@ -368,10 +418,16 @@ a bad idea to use the UMAP representation as they are distorted. Furthermore,
 using the UMAP representation for plotting the independently arisen clustering
 is a great sanity check. We will perform nuclei by building a shared nearest
 neighbour (SNN) [@xu2015] graph with the function in `buildSNNGraph` in 
-[scran](https://bioconductor.org/packages/release/bioc/html/scran.html). Here we
+[scran](https://bioconductor.org/packages/release/bioc/html/scran.html). SNN graph 
+are assessing the similarity between two cells in their local neighborhoods. 
+This measure effectively pools neighbor information across many cells and is 
+thus robust to aberrant connections in the neighbor graph. Here we
 choose to set `k=50`, which determines the number of clusters. As a general rule
 with more nuclei in your dataset this should be increased. After generating the
 SNN, we will use the Louvain algorithm [@de2011] to identify clusters.
+
+This approach mimics the way Seurat clusters cells. This type of clustering
+has been shown to be highly effective for 10x data in particular [@freytag2018].
 
 ```{r clustering}
 snn_gr <- buildSNNGraph(sce, use.dimred = "corrected", k = 50)
