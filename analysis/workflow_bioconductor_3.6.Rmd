@@ -25,6 +25,7 @@ library(scran)
 library(batchelor)
 library(umap)
 library(schex)
+library(pheatmap)
 ```
 
 ```{r setup-ggplot2, message=FALSE}
@@ -226,8 +227,7 @@ going undetected and too lenient filtering, which may result in underpowered
 tests and problems with discreteness during normalization.
 
 ```{r filter-genes}
-keep_genes <- apply(counts(sce), 1, function(x)
-  sum(x > 0) > (dim(sce)[2] * 0.01))
+keep_genes <- nexprs(sce, byrow=TRUE) > (dim(sce)[2] * 0.01)
 
 sce <- sce[keep_genes, ]
 
@@ -430,6 +430,7 @@ This approach mimics the way Seurat clusters cells. This type of clustering
 has been shown to be highly effective for 10x data in particular [@freytag2018].
 
 ```{r clustering}
+set.seed(10)
 snn_gr <- buildSNNGraph(sce, use.dimred = "corrected", k = 50)
 clusters <- igraph::cluster_louvain(snn_gr)
 table(clusters$membership, sce$Sample_ID)
@@ -544,9 +545,55 @@ for (i in colnames(cell_type_means)) {
 
   print(gg)
 }
-
 ```
 
+### Annotation by correlation
+
+In order to guide annotation of clusters, automated cluster annotations like 
+[scmap](https://bioconductor.org/packages/release/bioc/html/scmap.html) 
+(which works on `SingleCellExperiment` objects) can be used. However, for this 
+dataset such methods did not result in sensible annotation. A more reliable 
+method is to correlate the mean expression of a chosen set of highly variable
+genes in each cluster with their mean expression across annotated clusters in a
+reference dataset. The resulting correlation can then be plotted in a heatmap,
+thus guiding cluster annotation. Here we will use the 
+[Allen Mouse Brain Atlas](https://mouse.brain-map.org/) as a reference dataset. 
+Refer to the document on `Processing the Reference Dataset` for more details.
+ 
+```{r scmap-intro}
+ref_sce <- readRDS(here::here("data/meta/", "allen_mouse_atlas.rds"))
+
+var_fit <- trendVar(sce, use.spikes=FALSE)
+var_out <- decomposeVar(sce, var_fit)
+
+rowData(sce)$hvg <- (var_out$FDR <=0.05 & var_out$bio >=0.5)
+
+hvg <- intersect(rowData(ref_sce)$gene_symbol[rowData(ref_sce)$hvg], 
+                 rowData(sce)$Symbol[rowData(sce)$hvg])
+
+rowData(ref_sce)$hvg <- rowData(ref_sce)$gene_symbol %in% hvg
+rowData(sce)$hvg <- rowData(sce)$Symbol %in% hvg
+```
+
+Note that we work with the Spearman correlation, which is a more robust way of
+measuring correlation. For each cluster we can then identify the most likely
+label present in the reference dataset.
+
+```{r scmap-proj}
+mean_sce <- sapply(unique(colData(sce)$Cluster), function(x) 
+  apply(logcounts(sce[rowData(sce)$hvg, 
+    which(colData(sce)$Cluster==x)]), 1, mean))
+
+mean_sce_ref <- sapply(unique(colData(ref_sce)$class), function(x) 
+  apply(logcounts(ref_sce[rowData(ref_sce)$hvg, 
+    which(colData(ref_sce)$class==x)]), 1, mean))
+
+cor_sce <- apply(mean_sce, 2, function(x)
+  apply(mean_sce_ref, 2, function(y) cor(x, y, method="spearman")))
+colnames(cor_sce) <- unique(colData(sce)$Cluster)
+
+pheatmap(cor_sce)
+```
 
 ## Rescaling of batches
 
