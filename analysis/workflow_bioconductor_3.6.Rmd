@@ -102,10 +102,12 @@ names(dat) <- samples
 We combine the two objects into a single `SingleCellExperiment` object. However,
 to successfully achieve this we will firstly need to verify that the genes in 
 both objects are in the same order. Secondly, we will create an idenifier for 
-each sample as an additional column in the cell meta information.
+each sample as an additional column in the cell meta information. Note that this
+will also work with more than two objects. 
 
 ```{r combine-data}
-stopifnot(identical(rownames(dat[1]), rownames(dat[2])))
+all_rownames <- lapply(dat, rownames)
+stopifnot(all(sapply(all_rownames, identical, all_rownames[[1]])))
 
 for (i in 1:length(samples)) {
   dat[[i]]$Sample_ID <- samples[i]
