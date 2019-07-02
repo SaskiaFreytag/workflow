@@ -341,9 +341,13 @@ plot_dat <- data.frame(
   umi = sce$total_counts
 )
 
+ratio <- pca_comp$var_exp[1]/pca_comp$var_exp[2]
 ggplot(plot_dat, aes(x = pca1, y = pca2)) +
   geom_point(aes(col = sample), alpha = 0.5) +
-  scale_colour_brewer(palette = "Set1")
+  scale_colour_brewer(palette = "Set1") + coord_fixed(ratio=1/ratio)
+```
+
+```{r plotting2}
 ggplot(plot_dat, aes(x = mnn1, y = mnn2)) +
   geom_point(aes(col = sample), alpha = 0.5) +
   scale_colour_brewer(palette = "Set1")
@@ -373,7 +377,7 @@ plot_dat$umap2 <- reducedDim(sce, "UMAP")[, 2]
 
 ggplot(plot_dat, aes(x = umap1, y = umap2)) +
   geom_point(aes(col = sample), alpha = 0.5) +
-  scale_colour_brewer(palette = "Set1")
+  scale_colour_brewer(palette = "Set1") 
 ```
 
 ### Calculate hexagon cell representation
@@ -562,16 +566,11 @@ thus guiding cluster annotation. Here we will use the
 [Allen Mouse Brain Atlas](https://mouse.brain-map.org/) as a reference dataset. 
 Refer to the document on `Processing the Reference Dataset` for more details.
  
-```{r scmap-intro}
+```{r corr-intro}
 ref_sce <- readRDS(here::here("data/meta/", "allen_mouse_atlas.rds"))
 
-var_fit <- trendVar(sce, use.spikes=FALSE)
-var_out <- decomposeVar(sce, var_fit)
-
-rowData(sce)$hvg <- (var_out$FDR <=0.05 & var_out$bio >=0.5)
-
 hvg <- intersect(rowData(ref_sce)$gene_symbol[rowData(ref_sce)$hvg], 
-                 rowData(sce)$Symbol[rowData(sce)$hvg])
+                 rowData(sce)$Symbol)
 
 rowData(ref_sce)$hvg <- rowData(ref_sce)$gene_symbol %in% hvg
 rowData(sce)$hvg <- rowData(sce)$Symbol %in% hvg
@@ -581,7 +580,7 @@ Note that we work with the Spearman correlation, which is a more robust way of
 measuring correlation. For each cluster we can then identify the most likely
 label present in the reference dataset.
 
-```{r scmap-proj}
+```{r corr-proj}
 mean_sce <- sapply(unique(colData(sce)$Cluster), function(x) 
   apply(logcounts(sce[rowData(sce)$hvg, 
     which(colData(sce)$Cluster==x)]), 1, mean))
