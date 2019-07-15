@@ -3,9 +3,8 @@ title: 'snRNA-seq workflow: bioconductor'
 author: "Saskia Freytag"
 date: "08/04/2019"
 output:
-  html_document:
+  github_document:
     toc: true
-    theme: simplex
 bibliography: /Users/saskiafreytag/workflow/bib.bibtex
 ---
 
@@ -57,7 +56,12 @@ and gene.
 
 Unfortunately, [CellRanger](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/what-is-cell-ranger) recently changed its naming convention for the 
 files contained within `filtered_gene_bc_matrices`. For this workflow we need to 
-rename the file called `features.tsv` to its earlier naming convention -  `genes.tsv`.  
+rename the file called `features.tsv` to its earlier naming convention -  `genes.tsv`. 
+
+**Note:** This workflow is designed for mouse transcriptomic data in case you 
+have human transcriptomic data. You will need to change the annotation to 
+`library(org.Hs.eg.db)` and also you will also amend the gene names. Everything else should
+remain the same.
 
 ## Data import
 
@@ -117,6 +121,28 @@ sce <- do.call(cbind, dat)
 sce$Sample_ID <- as.factor(sce$Sample_ID)
 ```
 
+**Note:** If you have both samples generated with version 2 and version 3 
+10x Genomics chemistry, you will need to slightly modify version 3 data structure 
+in order to fit version 2. It also requires an identifier for whether a sample
+was generated with version 2 or version 3 10x Genomics chemistry. Here we
+assume that this identifier is called `chemistry`. So instead of running the 
+previous chunk of code, the following code should be run.
+
+```{r eval=FALSE}
+all_rownames <- lapply(dat, rownames)
+stopifnot(all(sapply(all_rownames, identical, all_rownames[[1]])))
+
+for (i in 1:length(samples)) {
+  dat[[i]]$Sample_ID <- samples[i]
+  if(chemistry == "version 3"){
+    rowData(dat[[i]]) <- rowData(dat[[i]])[,1:2]
+  }
+}
+
+sce <- do.call(cbind, dat)
+sce$Sample_ID <- as.factor(sce$Sample_ID)
+```
+
 ## Filtering
 
 ### Filtering of nuclei
@@ -124,26 +150,34 @@ sce$Sample_ID <- as.factor(sce$Sample_ID)
 Low-quality nuclei need to be removed in order to ensure that technical effects
 do not distort downstream analysis results. 
 
-#### Filtering nuclei by mitochondrial content
+#### Filtering nuclei by mitochondrial and  nuclear ribosomal content 
 
 Data from nuclei should not contain any RNA from mitochondrial genes, as these
 can only be found in the cytoplasm [@nagy2018]. Any nuclei with high mitochondrial content
 points to debris being sequenced instead of a nuclei and should therefore be 
 removed [@luecken2019]. Hence, we filter any nuclei with greater than 10\% total mitochondrial 
-contamination. To ascertain the mitochondrial content in each nuclei, we use the
+contamination. I also removed any nuclei with greater than 20\% total ribosomal 
+content. The threshold here had to be set very tolerantly, but should probably be lowered for
+better quality datasets.
+To ascertain the mitochondrial and ribosomal content in each nuclei, we use the
 `calculateQCMetrics` from the [scater](https://bioconductor.org/packages/release/bioc/html/scater.html) 
 package. This function will store the percentage of mitochondrial content as 
 well as several other quality metrics for future use in the column meta data of 
 the `SingleCellExperiment` object.
 
-```{r filter-mito}
+
+```{r filter-mito-ribo}
 rowData(sce)$Mito <- grepl("^mt-", rowData(sce)$Symbol)
+rowData(sce)$Ribo <- grepl("Rpl", rowData(sce)$Symbol)
 sce <- calculateQCMetrics(sce,
-  feature_controls = list(Mt = rowData(sce)$Mito)
+  feature_controls = list(Mt = rowData(sce)$Mito, Rp=rowData(sce)$Ribo)
 )
 
 no_nuclei_mito <- sapply(levels(sce$Sample_ID), function(x)
   sum((colData(sce)$pct_counts_Mt > 10)[sce$Sample_ID == x]))
+
+no_nuclei_ribo <- sapply(levels(sce$Sample_ID), function(x)
+  sum((colData(sce)$pct_counts_Rp > 20)[sce$Sample_ID == x]))
 
 paste0(
   "Nuclei with more than 10% mitochondrial percentage in ", samples, ": ",
@@ -153,7 +187,27 @@ paste0(
   ), 2) * 100, "%)"
 )
 
-sce <- sce[, !colData(sce)$pct_counts_Mt > 10]
+paste0(
+  "Nuclei with more than 20% ribosomal percentage in ", samples, ": ",
+  no_nuclei_ribo, " (", round(no_nuclei_ribo / sapply(
+    levels(sce$Sample_ID),
+    function(x) sum(sce$Sample_ID == x)
+  ), 2) * 100, "%)"
+)
+
+rm_mito <- colData(sce)$pct_counts_Mt > 10
+rm_ribo <- colData(sce)$pct_counts_Rp > 20
+
+sce <- sce[, !(rm_mito|rm_ribo)]
+
+no_nuclei <-  sapply(levels(sce$Sample_ID), function(x)
+  sum(sce$Sample_ID == x))
+
+paste0(
+  "After removal of nuclei in ", samples, ": ",
+  no_nuclei
+)
+
 ```
 
 #### Filtering nuclei by total RNA content and diversity
@@ -306,7 +360,12 @@ using experimental mixture data [@tian2019]. Furthermore, it is implemented in
 the easy-to-use `fastMNN()` function from the 
 [batchelor](https://bioconductor.org/packages/devel/bioc/html/batchelor.html)
 package we will perform
-MNN correction on the principal components. MNN identification and correction 
+MNN correction on the principal components. Note that because we perform it on
+the prinicpal components, you will need to tell the algorithm how many principle
+components to consider. You can do so with the help of the parameter `d`, which 
+should be set to the value figured out during the previous step.
+
+MNN identification and correction 
 performed in a low-dimensional space offers some advantages with respect to 
 speed and is sufficient for the downstream steps of clustering, annotation and
 visualization.
@@ -341,10 +400,9 @@ plot_dat <- data.frame(
   umi = sce$total_counts
 )
 
-ratio <- pca_comp$var_exp[1]/pca_comp$var_exp[2]
 ggplot(plot_dat, aes(x = pca1, y = pca2)) +
   geom_point(aes(col = sample), alpha = 0.5) +
-  scale_colour_brewer(palette = "Set1") + coord_fixed(ratio=1/ratio)
+  scale_colour_brewer(palette = "Set1") 
 ```
 
 ```{r plotting2}
@@ -434,6 +492,8 @@ SNN, we will use the Louvain algorithm [@de2011] to identify clusters.
 
 This approach mimics the way Seurat clusters cells. This type of clustering
 has been shown to be highly effective for 10x data in particular [@freytag2018].
+However, Louvain clustering is known to perform poorly on smaller datasets
+[@kiselev2019].
 
 ```{r clustering}
 set.seed(10)
